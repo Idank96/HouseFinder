@@ -1,14 +1,252 @@
-from pathlib import Path
-import pandas as pd
-from tqdm import tqdm
-import pickle
-import os
+from __future__ import print_function
 
-def get_need_houses(need_house_path):
+from typing import List, Any
+
+import google
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from tqdm import tqdm
+import pandas as pd
+import os.path
+import re
+from time import sleep
+
+people_that_have_filter = []
+
+def get_df(spreadsheet_id):
+    # If modifying these scopes, delete the file token.json.
+    SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+    creds = None
+    # The file token.json stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+
+    try:
+        service = build('sheets', 'v4', credentials=creds)
+
+        # Call the Sheets API
+        sheet = service.spreadsheets()
+        result = sheet.values().get(spreadsheetId=spreadsheet_id,
+                                    range='תגובות לטופס 1').execute()
+        values = result.get('values', [])
+
+        if not values:
+            print('No data found.')
+            return
+
+        # Convert to a dataframe
+        df = pd.DataFrame.from_records(values[1:], columns=values[1]+['delete1', 'delete2'])
+
+    except HttpError as err:
+        print(err)
+
+    return df
+
+
+def init_spreadsheet(spreadsheet_id, gsheet_id):
+    # If modifying these scopes, delete the file token.json.
+    SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+    creds = None
+    # The file token.json stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+
+    try:
+        service = build('sheets', 'v4', credentials=creds)
+
+        my_range = {
+            'sheetId': gsheet_id,
+            'startRowIndex': 1,
+            'startColumnIndex': 0,
+        }
+    except HttpError as error:
+        print(f"An error occurred: {error}")
+
+    return my_range, service
+
+def apply_filter(kosher):
+  """Applies the appropriate filter based on the value of the `kosher` variable.
+
+  Args:
+    kosher: A string representing the value of the `kosher` variable.
+
+  Returns:
+    A dictionary representing the filter to apply, or `None` if no filter should be applied.
+  """
+
+  if kosher != 'לא' and kosher != '':
+    return {
+        '12': {
+      'condition': {
+        'type': 'TEXT_NOT_CONTAINS',
+        'values': {
+          'userEnteredValue': 'לא'
+        }
+      }
+    }
+    }
+  elif kosher == 'לא':
+    return {
+        '12': {
+      'condition': {
+        'type': 'TEXT_EQ',
+        'values': {
+          'userEnteredValue': 'לא'
+        }
+      }
+    }
+    }
+  else:
+    return None
+
+
+def create_filter_view_request(my_range, full_name, index, number_of_guests, kosher, pets, accessible, mamad):
+    addfilterviewrequest = {
+        'addFilterView': {
+            'filter': {
+                'title': index + '_' + full_name,
+                'range': my_range,
+                'sortSpecs': [
+                    {
+                    'dimensionIndex': 4, # I choose 4 because the number of guests column is in the 4th column.
+                    'sortOrder': 'ASCENDING'
+                    },
+                    {
+                        'dimensionIndex': 12,
+                        'sortOrder': 'ASCENDING',
+                    }
+                ],
+                'criteria': {
+                    '4': {
+                        'condition': {
+                            'type': 'NUMBER_GREATER_THAN_EQ',
+                            'values': {
+                                'userEnteredValue': number_of_guests
+                            }
+                        }
+                    },
+                    '7': {
+                        'condition': {
+                            'type': 'TEXT_NOT_CONTAINS',
+                            'values': {
+                                'userEnteredValue': 'לא'  # אם כתוב שם "חסר מקסימום אורחים" אז לא להביא אותם
+                            }
+                        }
+                    },
+                    '9': {
+                        'condition': {
+                            'type': 'TEXT_NOT_CONTAINS',
+                            'values': {
+                                'userEnteredValue': 'לא'
+                            }
+                        }
+                    } if (mamad != 'לא' and mamad != '') else None, # todo: כל מה שלא מכיל "לא",
+                    # The logic of column 16:
+                    # if pets is not "לא" then filter all the rows that not contains "לא" in the pets column
+                    '16': {
+                            'condition': {
+                                'type': 'TEXT_NOT_CONTAINS',
+                                'values': {
+                                    'userEnteredValue': 'לא'
+                                }
+                            }
+                        } if (pets != 'לא' and pets != '') else None,
+                    # '16': {
+                    #         'condition': {
+                    #             'type': 'TEXT_CONTAINS',
+                    #             'values': {
+                    #                 'userEnteredValue': accessible
+                    #             }
+                    #         }
+                    #     } if accessible else None,
+                }
+            }
+        }
+    }
+    # The logic of column 12:
+    # if kosher is not "לא" then filter all the rows that not contains "לא" in the kosher column
+    # if kosher is "לא" then filter all the rows that contains "לא" in the kosher column
+    # if kosher is blank then do nothing
+    kosher_filter = apply_filter(kosher)
+    if kosher_filter:
+        addfilterviewrequest['addFilterView']['filter']['criteria'].update(kosher_filter)
+
+    body = {'requests': [addfilterviewrequest]}
+    return body
+
+
+def update_spreadsheet(spreadsheet_id, body, service):
+    my_error = False
+    try:
+        addfilterviewresponse = service.spreadsheets() \
+            .batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+        print(str(addfilterviewresponse))
+    except HttpError as error:
+        print(f"An error occurred: {error}")
+        if 'שם אחר' in error.error_details:
+            people_that_have_filter.append(body['requests'][0]['addFilterView']['filter']['title'])
+        else:
+            my_error = True
+    return my_error
+
+
+def get_df_from_google_sheet(df_type: str = '', give_spreadsheet_id: str = '', need_spreadsheet_id: str = ''):
+    if not df_type:
+        return None
+    if df_type == 'need_df':
+        spreadsheet_id = need_spreadsheet_id
+    elif df_type == 'give_df':
+        spreadsheet_id = give_spreadsheet_id
+
+    df = get_df(spreadsheet_id)
+
+    return df
+
+
+def pre_clean_data(df):
+    # Remove " from each column string
+    df.columns = df.columns.str.replace('"', '')
+
+    df = df.replace("זוג", 2)
+
+    return df
+
+
+def clean_need_df(need_house_df):
     # read the excel file
-    need_house_df = pd.read_excel(need_house_path, skiprows=1)
-    #Remove " from each column string
-    need_house_df.columns = need_house_df.columns.str.replace('"', '')
+    need_house_df = pre_clean_data(need_house_df)
+
     # Rename the columns to English
     need_house_df = need_house_df.rename(columns={
     "חותמת זמן": "timestamp",
@@ -31,158 +269,89 @@ def get_need_houses(need_house_path):
     "שונות": "other",
     "מצב הבקשה": "request status",
     "Unnamed: 19": "unknown",
+    'האם חובה ממד  ?(שימו לב-  בית עם מקלט במקום ממד מזרז משמעותית זמני טיפול) ': 'mamad',
 })
+    need_house_df = post_clean_data(need_house_df)
 
-    # Filter only rows that have nan in the "request status" column
-    need_house_df = need_house_df[need_house_df['request status'].isna()]
-
-    # Filter rows that have nan in the "number of guests" column
-    need_house_df = need_house_df[need_house_df['number of guests'].notna()]
-
-    # Convert the "number of guests" column to string
-    need_house_df['number of guests'] = need_house_df['number of guests'].astype(str)
-
-    # Convert the "can have pets" column to string
-    need_house_df['pets'] = need_house_df['pets'].astype(str)
-
-    # Convert the "kosher" column to string
-    need_house_df['kosher'] = need_house_df['kosher'].astype(str)
+    # Filter only rows that have nan in the "request status" column or have "בטיפול" in the "request status" column
+    need_house_df = need_house_df[need_house_df['request status'].isna() | need_house_df['request status'].str.contains('בטיפול')]
 
     # Reset index
-    need_house_df = need_house_df.reset_index()
+    # need_house_df = need_house_df.reset_index()
     return need_house_df
 
 
-def get_give_houses(give_house_path):
-    give_house_df = pd.read_excel(give_house_path, skiprows=1)
-    # Remove " from each column string
-    give_house_df.columns = give_house_df.columns.str.replace('"', '')
-    # Rename the columns to English
-    give_house_df = give_house_df.rename(columns={
-    "חותמת זמן": "timestamp",
-    "כתובת אימייל": "email address",
-    "שם מלא": "full name",
-    "טלפון  ": "phone number",
-    "מה מספר אורחים שאתם יכולים לארח? ": "number of guests",
-    "הערות": "notes",
-    "יישוב ": "city",
-    "האם שומרי כשרות": "kosher",
-    "האם הבית מונגש": "accessible",
-    "האם יש לכם בעח בבית? ": "pets",
-    "הערות לגבי כשרות": "kosher details",
-    " האם יכולים לארח בעח?": "can have pets",
-    "האם יש ממד בבית": "balcony",
-    "האם מדובר במרחב נפרד (יחד/בית/דירה) שיעמוד לרשות האורחים?": "separate space",
-    "מיון": "sorting",
-    "בטיפול מי": "who is in charge?",
-    "Unnamed: 16": "unknown 16",
-    "Unnamed: 17": "unknown 17",
-    "Unnamed: 18": "unknown 18",
-    "Unnamed: 19": "unknown 19",
-    "Unnamed: 20": "unknown 20",
-})
-
+def post_clean_data(df):
     # Filter rows that have nan in the "number of guests" column
-    give_house_df = give_house_df[give_house_df['number of guests'].notna()]
+    df = df[df['number of guests'].notna()]
 
     # Convert the "number of guests" column to string
-    give_house_df['number of guests'] = give_house_df['number of guests'].astype(str)
+    df['number of guests'] = df['number of guests'].astype(str)
 
     # Convert the "can have pets" column to string
-    give_house_df['can have pets'] = give_house_df['can have pets'].astype(str)
+    df['pets'] = df['pets'].astype(str)
 
     # Convert the "kosher" column to string
-    give_house_df['kosher'] = give_house_df['kosher'].astype(str)
-    give_house_df = give_house_df.reset_index()
+    df['kosher'] = df['kosher'].astype(str)
 
-    # Reset index
-    give_house_df = give_house_df.reset_index()
-
-    return give_house_df
+    return df
 
 
-def iterate_through_houses(need_houses_df, give_houses_df):
-    print('start matching...')
-    matches = {}
-    tqdm_need_houses = tqdm(need_houses_df.iterrows())
+def create_filters(need_house_df, my_range, service, spreadsheet_id) -> list:
+    rows_with_errors = []
+    tqdm_need_houses = tqdm(need_house_df.iterrows())
+    n = 1
     # iterate through the need houses
     for i, row in tqdm_need_houses:
-        # iterate through the give houses
-        for i2, row2 in give_houses_df.iterrows():
-            if row['number of guests'] in row2['number of guests']:
-                # if ((row['pets'] == 'כן' and 'לא' not in row2['can have pets']) or
-                #         (row['pets'] == 'לא' and 'לא' in row2['can have pets'])):
-                if ((row['kosher'] == 'כן' and 'כן' in row2['kosher']) or
-                        (row['kosher'] == 'לא' and 'לא' in row2['kosher'])):
-                    matches[i] = [] if i not in matches else matches[i]
-                    matches[i].append(i2)
-
-    return matches
-
-
-def create_table_for_each_match(matches, need_houses_df, give_houses_df):
-    # For each match, create a table with the need house and the give house
-    for need_house_index, give_houses_indexes in matches.items():
-        # Create new dataframe
-        df = pd.DataFrame(columns=need_houses_df.columns)
-        # Add the need house to the dataframe
-        df = pd.concat([df, need_houses_df.loc[[need_house_index]]])
-        # Create the second row empty
-        df.loc[len(df)] = pd.Series(dtype='float64')
-        # Add the give houses to the dataframe
-        df = pd.concat([df, give_houses_df.iloc[give_houses_indexes]])
-        # Return to origin columns in Hebrew
-        df = df.rename(columns={
-        "timestamp": "חותמת זמן",
-        "email address": "כתובת אימייל",
-        "full name": "שם מלא",
-        "phone number": "טלפון  ",
-        "number of guests": "מה מספר אורחים שאתם יכולים לארח? ",
-        "notes": "הערות",
-        "city": "יישוב ",
-        "kosher": "האם שומרי כשרות",
-        "accessible": "האם הבית מונגש",
-        "pets": "האם יש לכם בעח בבית? ",
-        "kosher details": "הערות לגבי כשרות",
-        "can have pets": " האם יכולים לארח בעח?",
-        "balcony": "האם יש ממד בבית",
-        "separate space": "האם מדובר במרחב נפרד (יחד/בית/דירה) שיעמוד לרשות האורחים?",
-        "sorting": "מיון",
-        "who is in charge?": "בטיפול מי",
-        "unknown 16": "unknown 16",
-        "unknown 17": "unknown 17",
-        "unknown 18": "unknown 18",
-        "unknown 19": "unknown 19",
-        "unknown 20": "unknown 20",
-        })
-
-        need_full_name = need_houses_df.iloc[need_house_index]['full name']
-        path_to_save = os.path.join("matches", f"{need_house_index}_{need_full_name}.xlsx")
-        # Write the df to a new excel file
-        df.to_excel(path_to_save, index=False)
-
-
-def save_matches_to_pickle(matches):
-    with open('matches.pickle', 'wb') as file:
-        pickle.dump(matches, file, protocol=pickle.HIGHEST_PROTOCOL)
+        # if row['full name'] != 'יעל גולן':
+        #     continue
+        # if n < 166:
+        #     n += 1
+        #     continue
+        body = create_filter_view_request(my_range,
+                                          row['full name'],
+                                          str(i+2),
+                                          row['number of guests'],
+                                          row['kosher'],
+                                          row['pets'],
+                                          row['accessible'],
+                                          row['mamad'])
+        error = update_spreadsheet(spreadsheet_id, body, service)
+        if error:
+            rows_with_errors.append([row['full name'], str(i+2)])
+        sleep(1)
+        # n += 1
+    return rows_with_errors
 
 
 def main():
-    need_house_path = Path(r'need_house.xlsx')
-    give_house_path = Path(r'give_house.xlsx')
+    give_spreadsheet_id = '1fIrzqDHykh9CoigUJqmZR0WtORr2z8tyapZC2X93srg'
+    give_gsheet_id = 1511246512
+    need_spreadsheet_id = '1nTaltqeLeyTDP8kwC9U1sEQjHuZPVEib59n0ZhCOrXY'
 
-    need_houses_df = get_need_houses(need_house_path)
-    give_houses_df = get_give_houses(give_house_path)
+    need_house_df = get_df_from_google_sheet('need_df', give_spreadsheet_id=give_spreadsheet_id, need_spreadsheet_id=need_spreadsheet_id)
+    need_house_df = clean_need_df(need_house_df)
 
-    # Load the matches from a pickle file
-    with open('matches.pickle', 'rb') as handle:
-        matches = pickle.load(handle)
+    my_range, service = init_spreadsheet(give_spreadsheet_id, give_gsheet_id)
+    rows_with_errors = create_filters(need_house_df, my_range, service, give_spreadsheet_id)
+    print(rows_with_errors)
 
-    # matches = iterate_through_houses(need_houses_df, give_houses_df)
-    # save_matches_to_pickle(matches)
+    # write to text file the people that have filter:
+    with open('people_that_have_filter.txt', 'w') as f:
+        for item in people_that_have_filter:
+            f.write("%s\n" % item)
 
-    create_table_for_each_match(matches, need_houses_df, give_houses_df)
+    # write to text file the people that have errors:
+    with open('people_that_have_errors.txt', 'w') as f:
+        for item in rows_with_errors:
+            f.write("%s\n" % item)
+
+    print(f'Done! (with {len(rows_with_errors)} errors)')
 
 if __name__ == '__main__':
     main()
-    print('Done')
+
+# TODO: run the script automatic twice a day
+
+
+
