@@ -592,10 +592,10 @@ def create_request_type_filters(need_house_df, need_spreadsheet_id, need_gsheet_
 
 
 def main():
-    give_spreadsheet_id = "1fIrzqDHykh9CoigUJqmZR0WtORr2z8tyapZC2X93srg"
-    give_gsheet_id = 1511246512
-    need_spreadsheet_id = "1nTaltqeLeyTDP8kwC9U1sEQjHuZPVEib59n0ZhCOrXY"
-    need_gsheet_id = 1495994507
+    give_spreadsheet_id = ""
+    give_gsheet_id = 0
+    need_spreadsheet_id = ""
+    need_gsheet_id = 0
 
     need_house_df = get_df_from_google_sheet(
         "need_df",
