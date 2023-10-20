@@ -614,4 +614,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-# TODO: run the script automatic twice a day
